@@ -1,3 +1,5 @@
 #pragma once
 #include <string>
-std::string md5(std::string& in);
+#include <vector> 
+
+std::string md5(std::string in);
