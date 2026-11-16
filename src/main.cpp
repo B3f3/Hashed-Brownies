@@ -1,14 +1,13 @@
 #include <iostream>
+#include <fstream> 
+#include "./headers/md5.h"
 
 int main(int argc, char* argv[]) {
 
+    std::string word;
+    std::string hash;
     std::string wordlist;
     std::string hashes;
-
-    std::cout << "Got " << argc << " arguments\n";
-    for (int i = 0; i < argc; ++i) {
-        std::cout << "argv[" << i << "] = " << argv[i] << "\n";
-    }
 
     if (argc <= 2)
     {
@@ -33,9 +32,25 @@ int main(int argc, char* argv[]) {
             "\n";
     } else {
         wordlist = argv[1];
+        wordlist = wordlist.substr(wordlist.find("=") + 1);
         hashes = argv[2];
     }
-    
+
+    std::ifstream WordlistFile(wordlist);
+
+    std::ifstream HashFile(hashes);
+
+    while (getline(HashFile, hash)){
+        WordlistFile.clear();        // clear the EOF flag
+        WordlistFile.seekg(0);
+        while (getline(WordlistFile, word))
+        {
+            if(md5(word) == hash){
+                std::cout << "hash: " << hash << " word: " << word << std::endl; 
+            }
+        }
+        
+    }
 
     return 0;
 }
