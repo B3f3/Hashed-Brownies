@@ -1,34 +1,27 @@
-#include "./headers/md5.h"
-
-#include <iostream>
+#include "./headers/Md5Format.h"
 #include <string>
 #include <cstdint>
 #include <vector>
 #include <cmath>
+#include <algorithm>
+#include <cctype>
 
-uint32_t F(uint32_t B, uint32_t C, uint32_t D, int i, int& g){
-    uint32_t F;
-    if (i < 16) {
-            F = (B & C) | (~B & D);         // round 1
-            g = i;
-    } else if (i < 32) {
-            F = (B & D) | (C & ~D);         // round 2
-            g = (5*i + 1) % 16;
-    } else if (i < 48) {
-            F = B ^ C ^ D;                  // round 3
-            g = (3*i + 5) % 16;
-    } else {
-            F = C ^ (B | ~D);               // round 4
-            g = (7*i) % 16;
-        }
-    return F;
+namespace {   // anonymous namespace = these are private to this file only
+
+uint32_t F(uint32_t B, uint32_t C, uint32_t D, int i, int& g) {
+    uint32_t f;
+    if      (i < 16) { f = (B & C) | (~B & D); g = i; }
+    else if (i < 32) { f = (B & D) | (C & ~D); g = (5*i + 1) % 16; }
+    else if (i < 48) { f = B ^ C ^ D;          g = (3*i + 5) % 16; }
+    else             { f = C ^ (B | ~D);       g = (7*i)     % 16; }
+    return f;
 }
 
 uint32_t leftrotate(uint32_t x, int c) {
     return (x << c) | (x >> (32 - c));
 }
 
-std::string md5(std::string in){
+std::string compute_md5(std::string in) {
     std::string out;
     size_t L = in.size();
     size_t count = ((56 - (L+ 1)) % 64 + 64) % 64;
@@ -99,3 +92,19 @@ std::string md5(std::string in){
 
     return out;
 }
+
+} // anonymous namespace
+
+std::string Md5Format::hash(const std::string& candidate) const {
+    return compute_md5(candidate);
+}
+
+std::string Md5Format::parse(const std::string& field) const {
+    std::string s = field;
+    while (!s.empty() && std::isspace((unsigned char)s.back())) s.pop_back();
+    std::transform(s.begin(), s.end(), s.begin(),
+                   [](unsigned char c){ return std::tolower(c); });
+    return s;
+}
+
+std::size_t Md5Format::digest_size() const { return 32; }

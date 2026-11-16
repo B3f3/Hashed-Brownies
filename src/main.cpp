@@ -1,10 +1,10 @@
 #include <iostream>
-#include <fstream> 
-#include "./headers/md5.h"
+#include <fstream>
+#include "./headers/Md5Format.h"
 
 int main(int argc, char* argv[]) {
 
-    std::string word;
+    std::string candidate;
     std::string hash;
     std::string wordlist;
     std::string hashes;
@@ -30,26 +30,30 @@ int main(int argc, char* argv[]) {
             "  Example:\n"
             "    " << argv[0] << " --wordlist=rockyou.txt hashes.txt\n"
             "\n";
+        return 0;                       // nothing to crack — stop here
     } else {
         wordlist = argv[1];
         wordlist = wordlist.substr(wordlist.find("=") + 1);
         hashes = argv[2];
     }
 
-    std::ifstream WordlistFile(wordlist);
+    Md5Format fmt;                       // <-- the format object
 
+    std::ifstream WordlistFile(wordlist);
     std::ifstream HashFile(hashes);
 
-    while (getline(HashFile, hash)){
-        WordlistFile.clear();        // clear the EOF flag
+    if (!WordlistFile) { std::cerr << "cannot open wordlist: " << wordlist << "\n"; return 1; }
+    if (!HashFile)     { std::cerr << "cannot open hashes: "   << hashes   << "\n"; return 1; }
+
+    while (getline(HashFile, hash)) {
+        std::string target = fmt.parse(hash);   // <-- normalize the target (trim/lowercase)
+        WordlistFile.clear();
         WordlistFile.seekg(0);
-        while (getline(WordlistFile, word))
-        {
-            if(md5(word) == hash){
-                std::cout << "hash: " << hash << " word: " << word << std::endl; 
+        while (getline(WordlistFile, candidate)) {
+            if (fmt.hash(candidate) == target) { // <-- fmt.hash() instead of md5()
+                std::cout << "hash: " << target << " word: " << candidate << std::endl;
             }
         }
-        
     }
 
     return 0;
