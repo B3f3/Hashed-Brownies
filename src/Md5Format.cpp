@@ -6,7 +6,7 @@
 #include <algorithm>
 #include <cctype>
 
-namespace {   // anonymous namespace = these are private to this file only
+namespace {   // anonymous namespace
 
 uint32_t F(uint32_t B, uint32_t C, uint32_t D, int i, int& g) {
     uint32_t f;
@@ -26,11 +26,11 @@ std::string compute_md5(std::string in) {
     size_t L = in.size();
     size_t count = ((56 - (L+ 1)) % 64 + 64) % 64;
 
-    std::vector<uint8_t> buf (in.begin(), in.end());          // uint8_t = unsigned, always 0–255
-    buf.push_back(0x80);               // no cast needed, no sign issues
+    std::vector<uint8_t> buf (in.begin(), in.end());         
+    buf.push_back(0x80);             
     buf.insert(buf.end(), count, 0x00);
 
-    uint64_t bits = (uint64_t)L * 8;      // bit-length, in a 64-bit type
+    uint64_t bits = (uint64_t)L * 8;      
 
     for (int i = 0; i < 8; ++i) {
         buf.push_back( (bits >> (i * 8)) & 0xFF );
@@ -61,7 +61,7 @@ std::string compute_md5(std::string in) {
                   | ((uint32_t)buf[block + j*4 + 3] << 24);
         }
 
-        uint32_t A = a0, B = b0, C = c0, D = d0;   // init once per block
+        uint32_t A = a0, B = b0, C = c0, D = d0;   
 
         for (int i = 0; i < 64; i++) {
             uint32_t f;
@@ -74,7 +74,7 @@ std::string compute_md5(std::string in) {
             B = B + leftrotate(f, s[i]);
         }
 
-        a0 += A;   // add this block's result back into running state
+        a0 += A;   
         b0 += B;
         c0 += C;
         d0 += D;
@@ -83,7 +83,7 @@ std::string compute_md5(std::string in) {
     uint32_t vals[4] = { a0, b0, c0, d0 };
     const char* hexdigits = "0123456789abcdef";
     for (int i = 0; i < 4; ++i) {
-        for (int j = 0; j < 4; ++j) {                 // little-endian byte order
+        for (int j = 0; j < 4; ++j) {                 
             uint8_t byte = (vals[i] >> (j * 8)) & 0xFF;
             out.push_back(hexdigits[byte >> 4]);
             out.push_back(hexdigits[byte & 0x0F]);
@@ -93,7 +93,7 @@ std::string compute_md5(std::string in) {
     return out;
 }
 
-} // anonymous namespace
+} 
 
 std::string Md5Format::hash(const std::string& candidate) const {
     return compute_md5(candidate);
