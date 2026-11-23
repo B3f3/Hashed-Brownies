@@ -1,149 +1,202 @@
-#include <iostream>
-#include <fstream>
-#include <unordered_set>
-#include <unordered_map>
 #include "./headers/Md5Format.h"
 #include "./headers/Sha256Format.h"
+#include "./headers/bruteforce.h"
+
+#include <iostream>
+#include <fstream>
+#include <unordered_map>
 #include <memory>
 #include <vector>
 #include <iomanip>
 #include <chrono>
 #include <utility>
+#include <string>
 
-std::unique_ptr<HashFormat> makeFormat(const std::string& name) {
-    if (name == "md5")    return std::make_unique<Md5Format>();
-    if (name == "sha256") return std::make_unique<Sha256Format>();
-    return nullptr;   // unknown
-}
+// digest -> list of identifiers (usernames) that share that digest
+using TargetMap = std::unordered_map<std::string, std::vector<std::string>>;
 
-std::unique_ptr<HashFormat> detectFormat(const std::string& hashLine) {
-    // try each known format; pick the one whose digest length matches
-    const char* names[] = { "md5", "sha256" };   // every format you support
-    for (const char* name : names) {
-        auto fmt = makeFormat(name);
-        if (fmt && hashLine.size() == fmt->digest_size())
-            return fmt;
-    }
-    return nullptr;   // unknown length
+
+// ---------------------------------------------------------------------------
+// Small helpers
+// ---------------------------------------------------------------------------
+
+// Remove a trailing CR/LF left by getline on Windows-formatted files.
+static void stripLineEnding(std::string& s) {
+    while (!s.empty() && (s.back() == '\r' || s.back() == '\n'))
+        s.pop_back();
 }
 
 // Split "username:hash" on the LAST ':' so colons in the username are safe.
-// No ':' at all -> the whole line is the hash, identifier is "?".
-std::pair<std::string, std::string> splitTarget(const std::string& line) {
+// A line with no ':' is treated as all-hash, with identifier "?".
+static std::pair<std::string, std::string> splitTarget(const std::string& line) {
     std::size_t pos = line.rfind(':');
     if (pos == std::string::npos) return { "?", line };
     return { line.substr(0, pos), line.substr(pos + 1) };
 }
 
-int main(int argc, char* argv[]) {
 
-    std::string candidate;
-    std::string hash;
+// ---------------------------------------------------------------------------
+// Command-line options
+// ---------------------------------------------------------------------------
+
+struct Options {
     std::string wordlist;
     std::string hashes;
-    std::string format;
+    std::string format;              // empty => auto-detect
+    std::string mode = "wordlist";   // "wordlist" or "brute"
+};
 
-
+static Options parseArgs(int argc, char* argv[]) {
+    Options opt;
     for (int i = 1; i < argc; ++i) {
-
-            std::string arg = argv[i];
-            if (arg.rfind("--wordlist=", 0) == 0) {        
-                wordlist = arg.substr(arg.find("=") + 1);
-            } else if (arg.rfind("--format=", 0) == 0) {
-                format = arg.substr(arg.find("=") + 1);
-            } else {
-                hashes = arg;                              
-            }
+        std::string arg = argv[i];
+        if (arg.rfind("--wordlist=", 0) == 0)      opt.wordlist = arg.substr(arg.find('=') + 1);
+        else if (arg.rfind("--format=", 0) == 0)   opt.format   = arg.substr(arg.find('=') + 1);
+        else if (arg.rfind("--mode=", 0) == 0)     opt.mode     = arg.substr(arg.find('=') + 1);
+        else                                       opt.hashes   = arg;   // the bare positional
     }
+    return opt;
+}
+
+static void printUsage(const char* prog) {
+    std::cout <<
+        "\n"
+        "  +==========================================+\n"
+        "  |          H A S H E D   B R O W N I E S    |\n"
+        "  |            password hash cracker          |\n"
+        "  +==========================================+\n"
+        "\n"
+        "  Usage:\n"
+        "    " << prog << " --wordlist=<PATH> <PATH_TO_HASHES> [--format=md5|sha256]\n"
+        "\n"
+        "  Options:\n"
+        "    --wordlist=<PATH>   Path to the wordlist file (required)\n"
+        "    --format=<name>     Hash type: md5 or sha256 (optional; auto-detected)\n"
+        "\n"
+        "  Arguments:\n"
+        "    <PATH_TO_HASHES>    File of target hashes, one 'username:hash' per line\n"
+        "\n"
+        "  Example:\n"
+        "    " << prog << " --wordlist=rockyou.txt hashes\n"
+        "\n";
+}
 
 
-    if (wordlist.empty() || hashes.empty()) { 
-        std::cout <<
-            "\n"
-            "  +==========================================+\n"
-            "  |          H A S H E D   B R O W N I E S    |\n"
-            "  |            password hash cracker          |\n"
-            "  +==========================================+\n"
-            "\n"
-            "  Usage:\n"
-            "    " << argv[0] << " --wordlist=<PATH> <PATH_TO_HASHES>\n"
-            "\n"
-            "  Options:\n"
-            "    --wordlist=<PATH>   Path to the wordlist file (required)\n"
-            "\n"
-            "  Arguments:\n"
-            "    <PATH_TO_HASHES>    File containing the hashes to crack\n"
-            "\n"
-            "  Example:\n"
-            "    " << argv[0] << " --wordlist=rockyou.txt hashes.txt\n"
-            "\n";
+// ---------------------------------------------------------------------------
+// Hash-format selection
+// ---------------------------------------------------------------------------
+
+static std::unique_ptr<HashFormat> makeFormat(const std::string& name) {
+    if (name == "md5")    return std::make_unique<Md5Format>();
+    if (name == "sha256") return std::make_unique<Sha256Format>();
+    return nullptr;
+}
+
+// Pick a format by matching the hash length against each known format's digest size.
+static std::unique_ptr<HashFormat> detectFormat(const std::string& hashLine) {
+    for (const char* name : { "md5", "sha256" }) {
+        auto fmt = makeFormat(name);
+        if (fmt && hashLine.size() == fmt->digest_size())
+            return fmt;
+    }
+    return nullptr;
+}
+
+// Use the explicit name if given; otherwise auto-detect from the first target hash.
+// Leaves hashFile rewound to the start so the loader can read every line.
+static std::unique_ptr<HashFormat> selectFormat(const std::string& name, std::ifstream& hashFile) {
+    if (!name.empty())
+        return makeFormat(name);
+
+    std::unique_ptr<HashFormat> fmt;
+    std::string firstLine;
+    if (getline(hashFile, firstLine)) {
+        stripLineEnding(firstLine);
+        std::string firstHash = splitTarget(firstLine).second;   // detect on the hash part only
+        fmt = detectFormat(firstHash);
+    }
+    hashFile.clear();     // reset EOF flag
+    hashFile.seekg(0);    // rewind for the loader
+    return fmt;
+}
+
+
+// ---------------------------------------------------------------------------
+// Loading targets and running the attack
+// ---------------------------------------------------------------------------
+
+static TargetMap loadTargets(std::ifstream& hashFile, const HashFormat& fmt) {
+    TargetMap targets;
+    std::string line;
+    while (getline(hashFile, line)) {
+        auto [id, rawHash] = splitTarget(line);
+        std::string digest = fmt.parse(rawHash);     // trim + lowercase to canonical form
+        if (!digest.empty()) targets[digest].push_back(id);
+    }
+    return targets;
+}
+
+// Hash each wordlist candidate once and check it against all targets.
+// Returns the number of hashes cracked; prints each crack John-style.
+static std::size_t runWordlistAttack(std::ifstream& wordlistFile,
+                                     const HashFormat& fmt,
+                                     TargetMap& targets) {
+    std::size_t cracked = 0;
+    std::string candidate;
+    while (getline(wordlistFile, candidate)) {
+        stripLineEnding(candidate);                  // don't lowercase — passwords are case-sensitive
+
+        auto it = targets.find(fmt.hash(candidate));
+        if (it != targets.end()) {
+            for (const std::string& id : it->second)
+                std::cout << std::left << std::setw(16) << candidate << "(" << id << ")\n";
+            cracked++;
+            targets.erase(it);                       // avoid re-reporting; enables early stop
+            if (targets.empty()) break;
+        }
+    }
+    return cracked;
+}
+
+
+// ---------------------------------------------------------------------------
+// main
+// ---------------------------------------------------------------------------
+
+int main(int argc, char* argv[]) {
+    Options opt = parseArgs(argc, argv);
+
+    if (opt.wordlist.empty() || opt.hashes.empty()) {
+        printUsage(argv[0]);
         return 0;
     }
 
-    
-    std::ifstream WordlistFile(wordlist);
-    std::ifstream HashFile(hashes);
+    std::ifstream wordlistFile(opt.wordlist);
+    std::ifstream hashFile(opt.hashes);
+    if (!wordlistFile) { std::cerr << "cannot open wordlist: " << opt.wordlist << "\n"; return 1; }
+    if (!hashFile)     { std::cerr << "cannot open hashes: "   << opt.hashes   << "\n"; return 1; }
 
-    if (!WordlistFile) { std::cerr << "cannot open wordlist: " << wordlist << "\n"; return 1; }
-    if (!HashFile)     { std::cerr << "cannot open hashes: "   << hashes   << "\n"; return 1; }
-
-    std::unique_ptr<HashFormat> fmt;
-
-    if (!format.empty()) {
-        fmt = makeFormat(format);                 // user specified it explicitly
-    } else {
-        std::string firstLine;                    // auto-detect from the first target
-        if (getline(HashFile, firstLine)) {
-            // trim line-ending FIRST — see gotcha below
-            while (!firstLine.empty() &&
-                (firstLine.back() == '\r' || firstLine.back() == '\n'))
-                firstLine.pop_back();
-            std::string firstHash = splitTarget(firstLine).second;   // detect on the HASH part only
-            fmt = detectFormat(firstHash);
-        }
-        HashFile.clear();                         // reset EOF flag
-        HashFile.seekg(0);                        // rewind so the set-loading loop still sees ALL lines
-    }
+    std::unique_ptr<HashFormat> fmt = selectFormat(opt.format, hashFile);
     if (!fmt) { std::cerr << "could not determine hash format\n"; return 1; }
-    
-    // Load targets into a map: digest -> list of identifiers that share it.
-    std::unordered_map<std::string, std::vector<std::string>> targets;
-    while (getline(HashFile, hash)) {
-        auto [id, rawHash] = splitTarget(hash);
-        std::string digest = fmt->parse(rawHash);   // trim + lowercase to canonical form
-        if (!digest.empty()) targets[digest].push_back(id);
-    }
 
-    // Load line (John-style) + start the clock.
+    TargetMap targets = loadTargets(hashFile, *fmt);
     std::size_t total = targets.size();
-    std::cout << "Loaded " << total << " password hash"
-              << (total == 1 ? "" : "es")
-              << " (" << (format.empty() ? "auto-detected" : format) << ")\n";
+
+    std::cout << "Loaded " << total << " password hash" << (total == 1 ? "" : "es")
+              << " (" << (opt.format.empty() ? "auto-detected" : opt.format) << ")\n";
 
     auto start = std::chrono::steady_clock::now();
     std::size_t cracked = 0;
 
-    // Single pass over the wordlist: hash each candidate once, check against all targets.
-    while (getline(WordlistFile, candidate)) {
-        while (!candidate.empty() && (candidate.back() == '\r' || candidate.back() == '\n'))
-            candidate.pop_back();          // strip line-ending (don't lowercase — passwords are case-sensitive)
-
-        std::string digest = fmt->hash(candidate);
-        auto it = targets.find(digest);
-        if (it != targets.end()) {
-            for (const std::string& id : it->second)   // one line per identifier sharing this hash
-                std::cout << std::left << std::setw(16) << candidate << "(" << id << ")\n";
-            cracked++;                     // count the cracked hash
-            targets.erase(it);             // avoid re-reporting; enables early stop
-            if (targets.empty()) break;    // everything cracked, no need to keep scanning
-        }
+    if (opt.mode == "brute") {
+        bruteforce("a", 1, "a");     // TODO: brute-force mode (Milestone 3)
+    } else {
+        cracked = runWordlistAttack(wordlistFile, *fmt, targets);
     }
 
-    // Summary line (John-style).
-    auto end = std::chrono::steady_clock::now();
-    auto secs = std::chrono::duration_cast<std::chrono::seconds>(end - start).count();
-    std::cout << cracked << "g " << secs << "s DONE ("
-              << cracked << "/" << total << " cracked)\n";
+    auto secs = std::chrono::duration_cast<std::chrono::seconds>(
+                    std::chrono::steady_clock::now() - start).count();
+    std::cout << cracked << "g " << secs << "s DONE (" << cracked << "/" << total << " cracked)\n";
 
     return 0;
 }
