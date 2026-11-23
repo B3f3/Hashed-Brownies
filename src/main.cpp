@@ -1,10 +1,14 @@
 #include <iostream>
 #include <fstream>
 #include <unordered_set>
+#include <unordered_map>
 #include "./headers/Md5Format.h"
 #include "./headers/Sha256Format.h"
 #include <memory>
 #include <vector>
+#include <iomanip>
+#include <chrono>
+#include <utility>
 
 std::unique_ptr<HashFormat> makeFormat(const std::string& name) {
     if (name == "md5")    return std::make_unique<Md5Format>();
@@ -21,6 +25,14 @@ std::unique_ptr<HashFormat> detectFormat(const std::string& hashLine) {
             return fmt;
     }
     return nullptr;   // unknown length
+}
+
+// Split "username:hash" on the LAST ':' so colons in the username are safe.
+// No ':' at all -> the whole line is the hash, identifier is "?".
+std::pair<std::string, std::string> splitTarget(const std::string& line) {
+    std::size_t pos = line.rfind(':');
+    if (pos == std::string::npos) return { "?", line };
+    return { line.substr(0, pos), line.substr(pos + 1) };
 }
 
 int main(int argc, char* argv[]) {
@@ -80,12 +92,13 @@ int main(int argc, char* argv[]) {
     if (!format.empty()) {
         fmt = makeFormat(format);                 // user specified it explicitly
     } else {
-        std::string firstHash;                    // auto-detect from the first target
-        if (getline(HashFile, firstHash)) {
+        std::string firstLine;                    // auto-detect from the first target
+        if (getline(HashFile, firstLine)) {
             // trim line-ending FIRST — see gotcha below
-            while (!firstHash.empty() &&
-                (firstHash.back() == '\r' || firstHash.back() == '\n'))
-                firstHash.pop_back();
+            while (!firstLine.empty() &&
+                (firstLine.back() == '\r' || firstLine.back() == '\n'))
+                firstLine.pop_back();
+            std::string firstHash = splitTarget(firstLine).second;   // detect on the HASH part only
             fmt = detectFormat(firstHash);
         }
         HashFile.clear();                         // reset EOF flag
@@ -93,12 +106,22 @@ int main(int argc, char* argv[]) {
     }
     if (!fmt) { std::cerr << "could not determine hash format\n"; return 1; }
     
-    // Load every target hash into a set once (O(1) lookups later).
-    std::unordered_set<std::string> targets;
+    // Load targets into a map: digest -> list of identifiers that share it.
+    std::unordered_map<std::string, std::vector<std::string>> targets;
     while (getline(HashFile, hash)) {
-        std::string t = fmt->parse(hash);   // trim + lowercase to canonical form
-        if (!t.empty()) targets.insert(t);
+        auto [id, rawHash] = splitTarget(hash);
+        std::string digest = fmt->parse(rawHash);   // trim + lowercase to canonical form
+        if (!digest.empty()) targets[digest].push_back(id);
     }
+
+    // Load line (John-style) + start the clock.
+    std::size_t total = targets.size();
+    std::cout << "Loaded " << total << " password hash"
+              << (total == 1 ? "" : "es")
+              << " (" << (format.empty() ? "auto-detected" : format) << ")\n";
+
+    auto start = std::chrono::steady_clock::now();
+    std::size_t cracked = 0;
 
     // Single pass over the wordlist: hash each candidate once, check against all targets.
     while (getline(WordlistFile, candidate)) {
@@ -106,10 +129,21 @@ int main(int argc, char* argv[]) {
             candidate.pop_back();          // strip line-ending (don't lowercase — passwords are case-sensitive)
 
         std::string digest = fmt->hash(candidate);
-        if (targets.count(digest)) {
-            std::cout << "hash: " << digest << " word: " << candidate << std::endl;
+        auto it = targets.find(digest);
+        if (it != targets.end()) {
+            for (const std::string& id : it->second)   // one line per identifier sharing this hash
+                std::cout << std::left << std::setw(16) << candidate << "(" << id << ")\n";
+            cracked++;                     // count the cracked hash
+            targets.erase(it);             // avoid re-reporting; enables early stop
+            if (targets.empty()) break;    // everything cracked, no need to keep scanning
         }
     }
+
+    // Summary line (John-style).
+    auto end = std::chrono::steady_clock::now();
+    auto secs = std::chrono::duration_cast<std::chrono::seconds>(end - start).count();
+    std::cout << cracked << "g " << secs << "s DONE ("
+              << cracked << "/" << total << " cracked)\n";
 
     return 0;
 }
